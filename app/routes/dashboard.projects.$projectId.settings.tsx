@@ -12,11 +12,7 @@ import {
   getCustomDomainCnameTarget,
   findProjectByVerifiedCustomDomain,
 } from "~/lib/custom-domain.server";
-<<<<<<< HEAD
-import { Save, Settings, Loader2, ChevronLeft, Palette, MessageSquare, Bot, Zap, Users, Check, Trash2, Lock, Globe, AlertCircle, RefreshCw, Megaphone } from "lucide-react";
-=======
-import { Save, Settings, Loader2, ChevronLeft, Palette, MessageSquare, Bot, Zap, Users, Check, Trash2, Lock, Globe, AlertCircle, RefreshCw, Clock } from "lucide-react";
->>>>>>> origin/main
+import { Save, Settings, Loader2, ChevronLeft, Palette, MessageSquare, Bot, Zap, Users, Check, Trash2, Lock, Globe, AlertCircle, RefreshCw, Megaphone, Clock } from "lucide-react";
 import { useEffect, useState } from "react";
 
 const COMMON_TIMEZONES = [

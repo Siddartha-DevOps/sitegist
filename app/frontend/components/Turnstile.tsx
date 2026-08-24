@@ -2,12 +2,14 @@ import { useEffect, useRef } from "react";
 
 interface TurnstileProps {
   siteKey: string;
+  onVerify?: (token: string) => void;
+  onExpire?: () => void;
   options?: {
     theme?: "light" | "dark" | "fallback";
   };
 }
 
-export function Turnstile({ siteKey, options }: TurnstileProps) {
+export function Turnstile({ siteKey, options, onVerify, onExpire }: TurnstileProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const widgetIdRef = useRef<string | null>(null);
 
@@ -26,6 +28,9 @@ export function Turnstile({ siteKey, options }: TurnstileProps) {
           const id = turnstile.render(containerRef.current, {
             sitekey: siteKey,
             theme: options?.theme || "light",
+            callback: (token: string) => onVerify?.(token),
+            "expired-callback": () => onExpire?.(),
+            "error-callback": () => onExpire?.(),
           });
           widgetIdRef.current = id;
         } catch (err) {
@@ -113,7 +118,7 @@ export function Turnstile({ siteKey, options }: TurnstileProps) {
         }
       };
     }
-  }, [siteKey, options?.theme]);
+  }, [siteKey, options?.theme, onVerify, onExpire]);
 
   return (
     <div 

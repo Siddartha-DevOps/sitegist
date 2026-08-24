@@ -1,14 +1,26 @@
 import { Header } from "~/frontend/components/Header";
 import { Footer } from "~/frontend/components/Footer";
 import { MessageSquare, Copy, Check, Sparkles, Send, Loader2, RotateCcw } from "lucide-react";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useCallback } from "react";
+import type { LoaderFunctionArgs } from "@remix-run/node";
+import { json } from "@remix-run/node";
+import { useLoaderData } from "@remix-run/react";
+import { Turnstile } from "~/frontend/components/Turnstile";
+
+export async function loader(_args: LoaderFunctionArgs) {
+  return json({ turnstileSiteKey: process.env.VITE_CLOUDFLARE_TURNSTILE_SITE_KEY || "" });
+}
 
 export default function ReplyGenerator() {
+  const { turnstileSiteKey } = useLoaderData<typeof loader>();
   const [context, setContext] = useState("");
   const [tone, setTone] = useState("professional");
   const [isGenerating, setIsGenerating] = useState(false);
   const [result, setResult] = useState("");
   const [copied, setCopied] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState("");
+  const [turnstileVersion, setTurnstileVersion] = useState(0);
+  const clearTurnstile = useCallback(() => setTurnstileToken(""), []);
   const resultEndRef = useRef<HTMLDivElement>(null);
 
   const tones = [
@@ -20,7 +32,7 @@ export default function ReplyGenerator() {
   ];
 
   const handleGenerate = async () => {
-    if (!context.trim()) return;
+    if (!context.trim() || (turnstileSiteKey && !turnstileToken)) return;
 
     setIsGenerating(true);
     setResult("");
@@ -36,7 +48,7 @@ export default function ReplyGenerator() {
       const response = await fetch("/api/tools/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ prompt, turnstileToken: turnstileToken || "bypass-token" }),
       });
 
       if (!response.ok) throw new Error("Failed to start generation");
@@ -70,6 +82,10 @@ export default function ReplyGenerator() {
       setResult("Error generating reply. Please try again.");
     } finally {
       setIsGenerating(false);
+      if (turnstileSiteKey) {
+        setTurnstileToken("");
+        setTurnstileVersion((version) => version + 1);
+      }
     }
   };
 
@@ -131,7 +147,7 @@ export default function ReplyGenerator() {
 
             <button
               onClick={handleGenerate}
-              disabled={isGenerating || !context.trim()}
+              disabled={isGenerating || !context.trim() || (!!turnstileSiteKey && !turnstileToken)}
               className="w-full py-5 bg-brand-accent text-white rounded-3xl font-extrabold text-lg flex items-center justify-center gap-3 hover:bg-brand-dark transition-all shadow-xl shadow-brand-accent/10 disabled:opacity-50 disabled:cursor-not-allowed group overflow-hidden relative"
             >
               {isGenerating ? (
@@ -146,6 +162,11 @@ export default function ReplyGenerator() {
                 </>
               )}
             </button>
+            {turnstileSiteKey && (
+              <div className="mt-5 flex justify-center">
+                <Turnstile key={turnstileVersion} siteKey={turnstileSiteKey} onVerify={setTurnstileToken} onExpire={clearTurnstile} />
+              </div>
+            )}
           </div>
 
           {/* Result Section */}

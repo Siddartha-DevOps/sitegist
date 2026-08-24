@@ -565,10 +565,8 @@ function getClient(useFallback = false): any {
                 continue;
               }
 
-              // Schema-drift self-heal: if a column/table is missing (e.g. the DB
-              // hasn't received the latest migrations), apply the idempotent,
-              // additive pending migrations ONCE and retry — so the app recovers
-              // automatically instead of failing with "column ... does not exist".
+              // Optional schema-drift self-heal. ensureSchemaApplied is disabled
+              // unless AUTO_SCHEMA_SYNC=1 so normal web requests cannot execute DDL.
               const isUndefinedSchema =
                 errMsg.includes("42703") || errMsg.includes("42P01") ||
                 (errMsg.includes("does not exist") && (errMsg.includes("column") || errMsg.includes("relation")));

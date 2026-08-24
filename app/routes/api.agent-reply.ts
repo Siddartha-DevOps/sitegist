@@ -2,6 +2,8 @@ import type { ActionFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { requireUserId } from "~/backend/auth.server";
 import { prisma } from "~/database/db.server";
+import { requireProjectAccess } from "~/lib/project-access.server";
+import { broadcastRealtime } from "~/lib/partykit.server";
 
 export async function action({ request }: ActionFunctionArgs) {
   console.log(`[Agent Reply API] Action triggered`);
@@ -25,18 +27,12 @@ export async function action({ request }: ActionFunctionArgs) {
 
     if (!isDemo) {
       // Validate that this conversation belongs to the user's project
-      const session = await prisma.chatSession.findFirst({
-        where: {
-          id: sessionId,
-          project: {
-            userId,
-          },
-        },
-      });
+      const session = await prisma.chatSession.findUnique({ where: { id: sessionId }, select: { id: true, projectId: true } });
 
       if (!session) {
         return json({ error: "Conversation not found or unauthorized" }, { status: 404 });
       }
+      await requireProjectAccess(request, session.projectId, { minRole: "ADMIN" });
 
       // Create Message
       await prisma.message.create({
@@ -57,27 +53,8 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // Broadcast helper via PartyKit
-    const partykitHost = process.env.PARTYKIT_HOST;
-    if (partykitHost) {
-      const cleanHost = partykitHost.replace(/\/$/, "");
-      const roomUrl = `${cleanHost.startsWith("http") ? "" : "http://"}${cleanHost}/parties/main/${sessionId}`;
-      console.log(`[Agent Reply API] Broadcasting message to PartyKit room URL: ${roomUrl}`);
-      try {
-        await fetch(roomUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            type: "message",
-            role: "assistant",
-            content,
-          }),
-        });
-      } catch (partyErr) {
-        console.error("[Agent Reply API] Error broadcasting to PartyKit:", partyErr);
-      }
-    } else {
-      console.warn("[Agent Reply API] PARTYKIT_HOST is not set; skipping real-time broadcast.");
-    }
+    await broadcastRealtime(sessionId, { type: "message", role: "assistant", content })
+      .catch((partyErr) => console.error("[Agent Reply API] Error broadcasting to PartyKit:", partyErr));
 
     return json({ ok: true });
   } catch (err: any) {

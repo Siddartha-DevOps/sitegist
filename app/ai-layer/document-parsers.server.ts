@@ -1,6 +1,5 @@
 import Papa from "papaparse";
-// @ts-ignore
-import officeParser from "officeparser";
+import { unzipSync } from "fflate";
 
 // CSV → readable sentences. Each row becomes "Col1: val1; Col2: val2; ..."
 // so the embedding model sees structured, queryable context instead of raw commas.
@@ -31,11 +30,34 @@ export function parseCsv(buffer: Buffer): string {
   return lines.join("\n");
 }
 
-// PPTX → all slide text concatenated. officeparser walks the slide XML.
+function decodeXmlText(value: string) {
+  return value
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&apos;", "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([\da-f]+);/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)));
+}
+
+// PPTX → extract text runs from slide XML without executing embedded content.
 export async function parsePptx(buffer: Buffer): Promise<string> {
   try {
-    const text = await (officeParser as any).parseOfficeAsync(buffer);
-    return (text || "").trim();
+    if (buffer.length > 25 * 1024 * 1024) throw new Error("PPTX exceeds 25 MB");
+    const files = unzipSync(new Uint8Array(buffer), {
+      filter: ({ name }) => /^ppt\/slides\/slide\d+\.xml$/.test(name),
+    });
+    const slides = Object.entries(files)
+      .sort(([a], [b]) => Number(a.match(/slide(\d+)/)?.[1]) - Number(b.match(/slide(\d+)/)?.[1]))
+      .map(([, xml]) => {
+        if (xml.byteLength > 5 * 1024 * 1024) throw new Error("PPTX slide exceeds 5 MB");
+        const source = new TextDecoder().decode(xml);
+        return [...source.matchAll(/<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g)]
+          .map((match) => decodeXmlText(match[1]))
+          .join(" ");
+      });
+    return slides.join("\n").trim();
   } catch (error) {
     console.error("PPTX parse error:", error);
     return "";
