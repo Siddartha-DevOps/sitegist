@@ -3,6 +3,7 @@ import { json } from "@remix-run/node";
 import { useLoaderData, useFetcher } from "@remix-run/react";
 import { prisma } from "~/database/db.server";
 import { hasRemoveBrandingAccess } from "~/lib/plans";
+import { toPublicWidgetSettings } from "~/lib/public-widget-settings";
 import { useState, useEffect, useRef } from "react";
 import { Send, X, Bot, User, Loader2, ThumbsUp, ThumbsDown, Check, ExternalLink } from "lucide-react";
 import Markdown from "react-markdown";
@@ -43,7 +44,14 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
   const pageTitle = url.searchParams.get("pageTitle") || null;
 
   if (project.status !== "ACTIVE") {
-    return json({ project, notReady: true, isOffline: false, offlineMessage: null, pageUrl, pageTitle });
+    return json({
+      project: { id: project.id, name: project.name, status: project.status, settings: toPublicWidgetSettings(project.settings) },
+      notReady: true,
+      isOffline: false,
+      offlineMessage: null,
+      pageUrl,
+      pageTitle,
+    });
   }
 
   // Enforce remove-branding gate at render time
@@ -61,11 +69,25 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     ]);
     if (!hasRemoveBrandingAccess(user?.subscriptionTier, addons)) {
       const enforced = { ...settings, branding: { ...settings.branding, removeBranding: false } };
-      return json({ project: { ...project, settings: enforced }, notReady: false, isOffline, offlineMessage, pageUrl, pageTitle });
+      return json({
+        project: { id: project.id, name: project.name, status: project.status, settings: toPublicWidgetSettings(enforced) },
+        notReady: false,
+        isOffline,
+        offlineMessage,
+        pageUrl,
+        pageTitle,
+      });
     }
   }
 
-  return json({ project, notReady: false, isOffline, offlineMessage, pageUrl, pageTitle });
+  return json({
+    project: { id: project.id, name: project.name, status: project.status, settings: toPublicWidgetSettings(project.settings) },
+    notReady: false,
+    isOffline,
+    offlineMessage,
+    pageUrl,
+    pageTitle,
+  });
 }
 
 export const meta: MetaFunction<typeof loader> = ({ data }) => {
@@ -94,6 +116,8 @@ export default function EmbedChat() {
   const [showLeadForm, setShowLeadForm] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
+  const [realtimeToken, setRealtimeToken] = useState<string | null>(null);
   const [feedbackLoading, setFeedbackLoading] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
@@ -150,13 +174,13 @@ export default function EmbedChat() {
   }, [branding.proactive]);
 
   const handleFeedback = async (messageId: string, val: number) => {
-    if (!sessionId) return; // feedback is scoped to the visitor's session
+    if (!sessionId || !sessionToken) return;
     setFeedbackLoading(messageId);
     try {
       await fetch("/api/feedback", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messageId, sessionId, feedback: val }),
+        body: JSON.stringify({ messageId, sessionId, sessionToken, feedback: val }),
       });
       setMessages(prev => prev.map(m => m.id === messageId ? { ...m, feedback: val } : m));
     } catch (e) {
@@ -179,6 +203,8 @@ export default function EmbedChat() {
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem(storageKey);
       if (saved) setSessionId(saved);
+      setSessionToken(localStorage.getItem(`${storageKey}_token`));
+      setRealtimeToken(localStorage.getItem(`${storageKey}_realtime`));
     }
   }, [leadPolicy, sessionId, storageKey]);
 
@@ -186,7 +212,9 @@ export default function EmbedChat() {
     if (sessionId) {
       localStorage.setItem(storageKey, sessionId);
     }
-  }, [sessionId, storageKey]);
+    if (sessionToken) localStorage.setItem(`${storageKey}_token`, sessionToken);
+    if (realtimeToken) localStorage.setItem(`${storageKey}_realtime`, realtimeToken);
+  }, [sessionId, sessionToken, realtimeToken, storageKey]);
 
   const handleSend = async (text?: string) => {
     const messageToSend = text || input;
@@ -203,7 +231,7 @@ export default function EmbedChat() {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId: project.id, message: messageToSend, sessionId, pageUrl, pageTitle }),
+        body: JSON.stringify({ projectId: project.id, message: messageToSend, sessionId, sessionToken, pageUrl, pageTitle }),
       });
 
       if (response.status === 429) {
@@ -273,6 +301,8 @@ export default function EmbedChat() {
               if (data.sessionId) {
                 setSessionId(data.sessionId);
               }
+              if (data.sessionToken) setSessionToken(data.sessionToken);
+              if (data.realtimeToken) setRealtimeToken(data.realtimeToken);
               if (data.messageId) {
                 setMessages(prev => {
                   const newMsgs = [...prev];
@@ -351,14 +381,34 @@ export default function EmbedChat() {
     }
   };
 
-  const handleLeadSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+  const ensureWidgetSession = async () => {
+    if (sessionId && sessionToken) return { sessionId, sessionToken };
+    const response = await fetch("/api/widget/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId: project.id, pageUrl, pageTitle }),
+    });
+    if (!response.ok) throw new Error("Unable to establish a secure widget session");
+    const data = await response.json();
+    setSessionId(data.sessionId);
+    setSessionToken(data.sessionToken);
+    if (data.realtimeToken) setRealtimeToken(data.realtimeToken);
+    return { sessionId: data.sessionId as string, sessionToken: data.sessionToken as string };
+  };
+
+  const handleLeadSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
     const data = Object.fromEntries(formData);
-    leadFetcher.submit(
-      JSON.stringify({ ...data, projectId: project.id }),
-      { method: "post", action: "/api/lead", encType: "application/json" }
-    );
+    try {
+      const auth = await ensureWidgetSession();
+      leadFetcher.submit(
+        JSON.stringify({ ...data, projectId: project.id, ...auth }),
+        { method: "post", action: "/api/lead", encType: "application/json" }
+      );
+    } catch (error) {
+      console.error("Lead session setup failed:", error);
+    }
   };
 
   useEffect(() => {

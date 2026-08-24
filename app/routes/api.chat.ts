@@ -9,6 +9,8 @@ import { notifySlackEscalation } from "~/lib/slack.server";
 import { getUsageForUser } from "~/lib/usage.server";
 import { captureException } from "~/lib/monitoring.server";
 import { isOriginAllowed, originHost } from "~/lib/domains";
+import { createWidgetSessionToken, verifyWidgetSessionToken } from "~/lib/widget-session.server";
+import { broadcastRealtime, createRealtimeClientToken } from "~/lib/partykit.server";
 
 const HISTORY_CHAR_BUDGET = 6000;
 // Reject oversized messages: bounds memory/storage and caps LLM token cost (a
@@ -52,7 +54,7 @@ export async function action({ request }: ActionFunctionArgs) {
       return json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const { projectId, message, sessionId, pageUrl, pageTitle } = body;
+    const { projectId, message, sessionId, sessionToken: providedSessionToken, pageUrl, pageTitle } = body;
 
     if (!projectId || !message) {
       return json({ error: "Missing required fields (projectId, message)" }, { status: 400 });
@@ -197,11 +199,13 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // 1. Get or create session
     let session: any = null;
+    let issuedSessionToken: string | null = null;
+    let realtimeToken: string | null = null;
     let formattedHistory: { role: string, content: string }[] = [];
 
     if (projectId !== "demo-project") {
       try {
-        if (sessionId) {
+        if (sessionId && verifyWidgetSessionToken(providedSessionToken, String(sessionId), String(projectId))) {
           // Scope the session to this project — a sessionId from another
           // project must not be resumable here, or a visitor could replay/
           // continue another tenant's conversation by supplying its id.
@@ -220,6 +224,9 @@ export async function action({ request }: ActionFunctionArgs) {
           });
         }
 
+        issuedSessionToken = createWidgetSessionToken(session.id, projectId);
+        realtimeToken = await createRealtimeClientToken(session.id, "visitor");
+
         // If session is in human mode, AI should not respond
         if (session.mode === "human") {
           console.log(`[Chat] Session ${session.id} is in HUMAN mode. Skipping AI.`);
@@ -234,28 +241,15 @@ export async function action({ request }: ActionFunctionArgs) {
           scoreSentimentAsync(humanModeUserMsg.id, message);
 
           // Broadcast visitor message to PartyKit room live
-          const partykitHost = process.env.PARTYKIT_HOST;
-          if (partykitHost) {
-            const cleanHost = partykitHost.replace(/\/$/, "");
-            const roomUrl = `${cleanHost.startsWith("http") ? "" : "http://"}${cleanHost}/parties/main/${session.id}`;
-            console.log(`[api.chat.ts] Human mode live broadcast visitor message to PartyKit: ${roomUrl}`);
-            fetch(roomUrl, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                type: "message",
-                role: "user",
-                content: message,
-              }),
-            }).catch((err) => {
-              console.error("[api.chat.ts] PartyKit broadcast error:", err);
-            });
-          }
+          broadcastRealtime(session.id, { type: "message", role: "user", content: message })
+            .catch((err) => console.error("[api.chat.ts] PartyKit broadcast error:", err));
           
           return new Response(new ReadableStream({
              start(controller) {
+               const authData = JSON.stringify({ sessionId: session.id, sessionToken: issuedSessionToken, realtimeToken, chatMode });
+               controller.enqueue(new TextEncoder().encode(`event: session\ndata: ${authData}\n\n`));
                const data = JSON.stringify({ content: "Our support team has taken over this chat and will respond shortly." });
-               controller.enqueue(new TextEncoder().encode(`data: ${data}\n\n`));
+               controller.enqueue(new TextEncoder().encode(`event: message\ndata: ${data}\n\n`));
                controller.close();
              }
           }), { headers: { "Content-Type": "text/event-stream" } });
@@ -303,6 +297,7 @@ export async function action({ request }: ActionFunctionArgs) {
         }
       } catch (dbError) {
         console.error("[Chat] Database error in session management:", dbError);
+        return json({ error: "Unable to start chat session" }, { status: 503 });
       }
     }
 
@@ -316,7 +311,12 @@ export async function action({ request }: ActionFunctionArgs) {
         
         try {
           // Send initial session event
-          const initialData = JSON.stringify({ sessionId: session?.id || "demo-session", chatMode });
+          const initialData = JSON.stringify({
+            sessionId: session?.id || "demo-session",
+            sessionToken: issuedSessionToken,
+            realtimeToken,
+            chatMode,
+          });
           controller.enqueue(encoder.encode(`event: session\ndata: ${initialData}\n\n`));
 
           if (projectId !== "demo-project" && rateLimitPerUser > 0) {

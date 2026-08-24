@@ -1,17 +1,15 @@
 import type { ActionFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
-import { requireUserId } from "~/backend/auth.server";
 import { prisma } from "~/database/db.server";
 import { sendWebhook, webhookEventEnabled } from "~/lib/webhook.server";
+import { requireProjectAccess } from "~/lib/project-access.server";
+import { broadcastRealtime } from "~/lib/partykit.server";
 
 export async function action({ request }: ActionFunctionArgs) {
   console.log(`[Resolve Session API] Action triggered`);
   if (request.method !== "POST") {
     return json({ error: "Method not allowed" }, { status: 405 });
   }
-
-  // Require logged in user for dashboard authentication
-  const userId = await requireUserId(request);
 
   try {
     const { sessionId } = await request.json();
@@ -24,13 +22,8 @@ export async function action({ request }: ActionFunctionArgs) {
 
     if (!isDemo) {
       // Validate that this conversation belongs to the user's project
-      const session = await prisma.chatSession.findFirst({
-        where: {
-          id: sessionId,
-          project: {
-            userId,
-          },
-        },
+      const session = await prisma.chatSession.findUnique({
+        where: { id: sessionId },
         include: {
           project: true,
         },
@@ -39,6 +32,7 @@ export async function action({ request }: ActionFunctionArgs) {
       if (!session) {
         return json({ error: "Conversation not found or unauthorized" }, { status: 404 });
       }
+      await requireProjectAccess(request, session.projectId, { minRole: "ADMIN" });
 
       // Update session: mode: 'ai', status: 'resolved'
       await prisma.chatSession.update({
@@ -61,24 +55,8 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // Broadcast resolved event via PartyKit
-    const partykitHost = process.env.PARTYKIT_HOST;
-    if (partykitHost) {
-      const cleanHost = partykitHost.replace(/\/$/, "");
-      const roomUrl = `${cleanHost.startsWith("http") ? "" : "http://"}${cleanHost}/parties/main/${sessionId}`;
-      console.log(`[Resolve Session API] Broadcasting resolved status to: ${roomUrl}`);
-      try {
-        await fetch(roomUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            type: "resolved",
-            sessionId,
-          }),
-        });
-      } catch (partyErr) {
-        console.error("[Resolve Session API] Error broadcasting to PartyKit:", partyErr);
-      }
-    }
+    await broadcastRealtime(sessionId, { type: "resolved", sessionId })
+      .catch((partyErr) => console.error("[Resolve Session API] Error broadcasting to PartyKit:", partyErr));
 
     return json({ ok: true });
   } catch (err: any) {

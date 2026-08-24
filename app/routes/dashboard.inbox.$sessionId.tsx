@@ -7,6 +7,7 @@ import { ChevronLeft, User, Bot, Send, Calendar, Globe, Clock, MessageSquare, St
 import { format } from "date-fns";
 import { useEffect, useRef, useState } from "react";
 import { createChatSocket } from "~/lib/partykit.client";
+import { createRealtimeClientToken } from "~/lib/partykit.server";
 
 export async function loader({ params, request }: LoaderFunctionArgs) {
   const scope = await getAccessibleProjectScope(request);
@@ -40,7 +41,7 @@ export async function loader({ params, request }: LoaderFunctionArgs) {
     console.warn("[Inbox] cannedResponse lookup failed:", (e as any)?.message || e);
   }
 
-  return json({ session, cannedResponses });
+  return json({ session, cannedResponses, realtimeToken: await createRealtimeClientToken(session.id, "agent") });
 }
 
 export async function action({ request, params }: ActionFunctionArgs) {
@@ -174,7 +175,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
 }
 
 export default function SessionDetail() {
-  const { session, cannedResponses } = useLoaderData<typeof loader>();
+  const { session, cannedResponses, realtimeToken } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const formRef = useRef<HTMLFormElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -210,7 +211,7 @@ export default function SessionDetail() {
 
   // Connect to PartyKit for real-time delivery in the inbox
   useEffect(() => {
-    const socket = createChatSocket(session.id);
+    const socket = createChatSocket(session.id, realtimeToken);
     if (!socket) return;
 
     const listener = (evt: MessageEvent) => {
@@ -242,7 +243,7 @@ export default function SessionDetail() {
     return () => {
       socket.close();
     };
-  }, [session.id]);
+  }, [session.id, realtimeToken]);
 
   useEffect(() => {
     if (scrollRef.current) {

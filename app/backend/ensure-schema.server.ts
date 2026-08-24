@@ -6,7 +6,8 @@
  * query layer calls this automatically when a query fails because a column/table
  * is missing, so the app recovers on its own when it points at an un-migrated
  * database — instead of showing "column ... does not exist" until someone clicks
- * a button. Opt out with AUTO_SCHEMA_SYNC=0.
+ * a button. This is disabled by default and must be explicitly enabled with
+ * AUTO_SCHEMA_SYNC=1; production web runtimes should not have DDL privileges.
  */
 let synced = false;
 let inFlight: Promise<void> | null = null;
@@ -18,7 +19,7 @@ export function isSchemaSyncing(): boolean {
 
 export async function ensureSchemaApplied(): Promise<void> {
   if (synced) return;
-  if (process.env.AUTO_SCHEMA_SYNC === "0") return; // explicit opt-out
+  if (process.env.AUTO_SCHEMA_SYNC !== "1") return;
   if (!inFlight) {
     inFlight = (async () => {
       try {

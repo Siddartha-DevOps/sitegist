@@ -1,10 +1,9 @@
-import axios from "axios";
 import * as cheerio from "cheerio";
-import Sitemapper from "sitemapper";
 import mammoth from "mammoth";
 import { getFirecrawl } from "./firecrawl.server";
 import { parsePdf as parsePdfUtil } from "~/lib/pdf.server";
 import { YoutubeTranscript } from "youtube-transcript";
+import { assertSafeOutboundUrl, readTextWithLimit, safeOutboundFetch } from "~/lib/outbound-url.server";
 
 const CRAWLER_UA = "Mozilla/5.0 (compatible; SiteGistBot/1.0; +https://sitegist.ai)";
 
@@ -28,6 +27,7 @@ const FIRECRAWL_TIMEOUT_MS = 45_000;
  * Adds an explicit timeout and one retry on top of the SDK.
  */
 async function scrapeWithFirecrawl(url: string): Promise<{ title: string; content: string; url: string } | null> {
+  await assertSafeOutboundUrl(url);
   const firecrawl = getFirecrawl();
   if (!firecrawl) return null;
 
@@ -114,15 +114,11 @@ async function getRobots(origin: string): Promise<RobotsRules> {
   if (cached) return cached;
   let rules: RobotsRules = { disallow: [], allow: [] };
   try {
-    const res = await axios.get(`${origin}/robots.txt`, {
+    const res = await safeOutboundFetch(`${origin}/robots.txt`, {
       headers: { "User-Agent": CRAWLER_UA },
-      timeout: 5000,
-      maxContentLength: 512 * 1024,
-      maxBodyLength: 512 * 1024,
-      // Treat 4xx (no robots / forbidden) as "no rules"; only parse 2xx text.
-      validateStatus: (s) => s >= 200 && s < 300,
+      signal: AbortSignal.timeout(5000),
     });
-    if (typeof res.data === "string") rules = parseRobots(res.data);
+    if (res.ok) rules = parseRobots(await readTextWithLimit(res, 512 * 1024));
   } catch {
     // No robots.txt, unreachable, or oversized → fail open (allow).
   }
@@ -311,6 +307,7 @@ export async function parseDocx(buffer: Buffer) {
 }
 
 export async function crawlUrl(url: string, recursive = false) {
+  await assertSafeOutboundUrl(url);
   // Respect robots.txt before any fetch (both Firecrawl and the basic path).
   if (shouldRespectRobots() && !(await isAllowedByRobots(url))) {
     throw new Error(
@@ -322,19 +319,18 @@ export async function crawlUrl(url: string, recursive = false) {
   // Static-first: try plain HTTP + cheerio (fast, free, preserves normal HTML pages).
   // JS-rendered pages produce little/no readable text here and fall back to the
   // headless renderer (Firecrawl) further below.
-  let response: any;
+  let response: { data: string };
   try {
-    response = await axios.get(url, {
+    const fetched = await safeOutboundFetch(url, {
       headers: {
         "User-Agent": CRAWLER_UA,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
       },
-      timeout: 15000,
-      // Page-size guard: abort oversized bodies before they hit memory/cheerio.
-      maxContentLength: MAX_PAGE_BYTES,
-      maxBodyLength: MAX_PAGE_BYTES,
+      signal: AbortSignal.timeout(15000),
     });
+    if (!fetched.ok) throw new Error(`HTTP ${fetched.status}`);
+    response = { data: await readTextWithLimit(fetched, MAX_PAGE_BYTES) };
   } catch (error: any) {
     const msg = String(error?.message || "");
     if (error?.code === "ERR_FR_MAX_CONTENT_LENGTH_EXCEEDED" || /maxContentLength|maxBodyLength/i.test(msg)) {
@@ -507,6 +503,7 @@ export async function crawlUrl(url: string, recursive = false) {
 }
 
 export async function crawlRecursive(url: string, limit = 10) {
+  await assertSafeOutboundUrl(url);
   const firecrawl = getFirecrawl();
   if (firecrawl) {
     try {
@@ -540,14 +537,13 @@ export async function crawlRecursive(url: string, limit = 10) {
 }
 
 export async function getSitemapUrls(url: string) {
-  const sitemap = new Sitemapper({
-    url,
-    timeout: 15000,
-  });
-  
   try {
-    const { sites } = await sitemap.fetch();
-    return sites;
+    const response = await safeOutboundFetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!response.ok) return [];
+    const xml = await readTextWithLimit(response, 8 * 1024 * 1024);
+    return Array.from(xml.matchAll(/<loc(?:\s[^>]*)?>([\s\S]*?)<\/loc>/gi))
+      .map((match) => match[1].trim().replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">"))
+      .filter(Boolean);
   } catch (error) {
     console.error("Sitemap error:", error);
     return [];

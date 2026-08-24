@@ -1,10 +1,8 @@
 export async function verifyTurnstile(token: string) {
   const secretKey = process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY;
 
-  // If no Turnstile keys are configured in environment variables, or if using our frontend bypass-token, automatically allow.
-  if (!secretKey || secretKey === "1x0000000000000000000000000000000AA" || token === "bypass-token") {
-    return true;
-  }
+  if (token === "bypass-token") return process.env.NODE_ENV !== "production";
+  if (!secretKey || secretKey === "1x0000000000000000000000000000000AA") return process.env.NODE_ENV !== "production";
 
   const params = new URLSearchParams();
   params.append("secret", secretKey);

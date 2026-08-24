@@ -5,6 +5,9 @@ import { sendEmail } from "~/lib/email.server";
 import { sendWebhook, webhookEventEnabled } from "~/lib/webhook.server";
 import { notifySlackEscalation } from "~/lib/slack.server";
 import { pickAgentEmail } from "~/backend/routing.server";
+import { verifyWidgetSessionToken } from "~/lib/widget-session.server";
+import { enforcePublicRateLimit } from "~/lib/public-rate-limit.server";
+import { broadcastRealtime } from "~/lib/partykit.server";
 
 export async function action({ request }: ActionFunctionArgs) {
   console.log(`[Escalation API] Action triggered`);
@@ -13,30 +16,40 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   try {
-    const { sessionId, projectId } = await request.json();
+    const { sessionId, projectId, sessionToken } = await request.json();
 
-    if (!sessionId || !projectId) {
+    if (
+      typeof sessionId !== "string" || !sessionId || sessionId.length > 200 ||
+      typeof projectId !== "string" || !projectId || projectId.length > 200
+    ) {
       return json({ error: "Missing required fields" }, { status: 400 });
     }
 
     console.log(`[Escalation API] Processing sessionId: ${sessionId}, projectId: ${projectId}`);
 
-    const isDemo = projectId === "demo-project" || sessionId === "demo-session";
+    const isDemo = projectId === "demo-project" && sessionId === "demo-session";
 
     if (!isDemo) {
-      // 1. Set ChatSession.mode = 'human', ChatSession.isRead = false
-      try {
-        await prisma.chatSession.update({
-          where: { id: sessionId },
-          data: {
-            mode: "human",
-            isRead: false,
-            updatedAt: new Date(),
-          },
-        });
-      } catch (dbErr) {
-        console.error("[Escalation API] DB error setting mode to human:", dbErr);
+      const proofSession = await prisma.chatSession.findFirst({
+        where: { id: sessionId, projectId },
+        select: { id: true },
+      });
+      if (!proofSession || !verifyWidgetSessionToken(sessionToken, sessionId, projectId)) {
+        return json({ error: "Invalid widget session" }, { status: 401 });
       }
+
+      const limit = await enforcePublicRateLimit(request, `escalate:${projectId}`, 5, 3600);
+      if (!limit.allowed) {
+        return json({ error: "Too many escalation requests" }, { status: 429, headers: { "Retry-After": String(limit.retryAfter) } });
+      }
+
+      // Atomically claim the transition. Retries and concurrent requests must
+      // not send duplicate email, Slack, webhook, CRM, or help-desk actions.
+      const transition = await prisma.chatSession.updateMany({
+        where: { id: sessionId, projectId, mode: { not: "human" } },
+        data: { mode: "human", isRead: false, updatedAt: new Date() },
+      });
+      if (transition.count === 0) return json({ ok: true, alreadyEscalated: true });
 
       // 2. Load project + owner user
       try {
@@ -275,34 +288,18 @@ export async function action({ request }: ActionFunctionArgs) {
       } catch (projErr) {
         console.error("[Escalation API] DB error fetching project & user details:", projErr);
       }
+    } else {
+      const limit = await enforcePublicRateLimit(request, "escalate:demo", 5, 3600);
+      if (!limit.allowed) return json({ error: "Too many escalation requests" }, { status: 429 });
     }
 
     // 5. Broadcast via PartyKit to room `sessionId` so the Inbox/widget updates live
-    const partykitHost = process.env.PARTYKIT_HOST;
-    if (partykitHost) {
-      const cleanHost = partykitHost.replace(/\/$/, "");
-      const roomUrl = `${cleanHost.startsWith("http") ? "" : "http://"}${cleanHost}/parties/main/${sessionId}`;
-      console.log(`[Escalation API] PartyKit URL: ${roomUrl}`);
-      try {
-        await fetch(roomUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            type: "escalated",
-            sessionId,
-            mode: "human",
-          }),
-        });
-      } catch (partyErr) {
-        console.error("[Escalation API] Error broadcasting to PartyKit:", partyErr);
-      }
-    } else {
-      console.warn("[Escalation API] PARTYKIT_HOST is not set; skipping broadcast.");
-    }
+    await broadcastRealtime(sessionId, { type: "escalated", sessionId, mode: "human" })
+      .catch((partyErr) => console.error("[Escalation API] Error broadcasting to PartyKit:", partyErr));
 
     return json({ ok: true });
   } catch (err: any) {
     console.error("[Escalation API] Fatal error:", err);
-    return json({ error: err.message || "Internal server error" }, { status: 500 });
+    return json({ error: "Internal server error" }, { status: 500 });
   }
 }

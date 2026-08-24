@@ -28,6 +28,8 @@ DB missing a column. This checklist prevents all of those.
 |-----|---------|
 | `DATABASE_URL` | Postgres (Prisma Accelerate `prisma://` for the app). |
 | `SESSION_SECRET` | Session signing — must be a strong random value. |
+| `WIDGET_SESSION_SECRET` | Signs public widget session proofs. Use a separate strong random value. |
+| `PARTYKIT_AUTH_SECRET` | Signs realtime room access. Configure the identical value in the web app and PartyKit. |
 | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | Default LLM/embeddings key. |
 | `PINECONE_API_KEY`, `PINECONE_INDEX` | Vector store. |
 
@@ -78,6 +80,9 @@ verify your Resend sending domain (SPF/DKIM).
 | `HEALTHCHECK_TOKEN` | Unlocks verbose/deep `/api/health` output. |
 
 ## Database migrations (separate from the web build)
+
+- Keep **`AUTO_SCHEMA_SYNC=0`** in production. The web runtime must not have DDL
+  privileges; schema changes belong in the migration workflow below.
 
 - Prod was provisioned with `prisma db push` — schema changes are applied by the
   **`Database schema sync`** GitHub Action (`prisma db push`), not the Vercel build.
