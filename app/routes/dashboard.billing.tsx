@@ -4,6 +4,7 @@ import { useLoaderData, Form, useNavigation, useActionData } from "@remix-run/re
 import { requireUserId, getUser } from "~/backend/auth.server";
 import { prisma } from "~/database/db.server";
 import { getPlanForTier, hasRemoveBrandingAccess } from "~/lib/plans";
+import { getPaddlePriceCatalog } from "~/lib/paddle-prices";
 import { Check, CreditCard, Loader2, ChevronDown, Zap, MessageSquare, Globe, Plus, Info, AlertTriangle, ExternalLink } from "lucide-react";
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -47,9 +48,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
     where: { project: { userId } }
   });
 
-  const PADDLE_STARTER_PLAN_ID = process.env.VITE_PADDLE_STARTER_PLAN_ID || "pri_01kqpebd19q7nppxkh53e0cnd3";
-  const PADDLE_BASIC_PLAN_ID = process.env.VITE_PADDLE_GROWTH_PLAN_ID || process.env.VITE_PADDLE_BASIC_PLAN_ID || "pri_01kqpe8ad9772rdsn3ddbw4bg3";
-  const PADDLE_PRO_PLAN_ID = process.env.VITE_PADDLE_SCALE_PLAN_ID || process.env.VITE_PADDLE_PRO_PLAN_ID || "pri_01kqpe9hv3r1v9wfxxvnjgq9zk";
+  const catalog = getPaddlePriceCatalog();
+  const PADDLE_STARTER_PLAN_ID = catalog.starterPlanId;
+  const PADDLE_BASIC_PLAN_ID = catalog.growthPlanId;
+  const PADDLE_PRO_PLAN_ID = catalog.proPlanId;
 
   // Determine the current plan name + monthly message limit (-1 = unlimited)
   const planInfo = getPlanForTier(user?.subscriptionTier);
@@ -141,11 +143,26 @@ export async function loader({ request }: LoaderFunctionArgs) {
     console.error("[Billing] Addons query failed:", e);
   }
 
-  const removeBrandingAddonId = process.env.VITE_PADDLE_REMOVE_BRANDING_ADDON_ID || "";
+  const removeBrandingAddonId = catalog.removeBrandingAddonId;
   const removeBrandingEnabled = hasRemoveBrandingAccess(user?.subscriptionTier, userAddons);
+
+  // Paddle customer id for Retain (ctm_…), never internal userId.
+  let paddleCustomerId: string | null = null;
+  try {
+    const sub = await prisma.billingSubscription.findFirst({
+      where: { userId, externalCustomerId: { not: "" } },
+      orderBy: { updatedAt: "desc" },
+      select: { externalCustomerId: true },
+    });
+    paddleCustomerId = sub?.externalCustomerId || null;
+  } catch (e) {
+    console.error("[Billing] paddleCustomerId lookup failed:", e);
+  }
 
   return json({
     user,
+    paddleCustomerId,
+    catalogMissing: catalog.missing,
     daysLeft,
     usage: {
       messages: messagesCount,
@@ -188,7 +205,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function Billing() {
-  const { user, daysLeft, usage, PADDLE_STARTER_PLAN_ID, PADDLE_BASIC_PLAN_ID, PADDLE_PRO_PLAN_ID, PADDLE_REMOVE_BRANDING_ADDON_ID, planName, messageLimit, messagesUsed, nextBilledAt, daysRemaining, payments, chatbotCount, chatbotLimit, removeBrandingEnabled } = useLoaderData<typeof loader>();
+  const { user, paddleCustomerId, daysLeft, usage, PADDLE_STARTER_PLAN_ID, PADDLE_BASIC_PLAN_ID, PADDLE_PRO_PLAN_ID, PADDLE_REMOVE_BRANDING_ADDON_ID, planName, messageLimit, messagesUsed, nextBilledAt, daysRemaining, payments, chatbotCount, chatbotLimit, removeBrandingEnabled } = useLoaderData<typeof loader>();
   
   const isUnlimited = messageLimit === -1;
   const usagePercent = isUnlimited ? 0 : Math.min(100, Math.round((messagesUsed / messageLimit) * 100));
@@ -252,24 +269,18 @@ export default function Billing() {
   const isSubmitting = navigation.state === "submitting";
   const submittingPlanId = navigation.formData?.get("plan");
 
-  // Safe client-side Paddle initialization on load
+  // Live is default — no Environment.set("sandbox"). pwCustomer enables Retain.
   useEffect(() => {
-    // @ts-ignore
-    if (typeof Paddle !== 'undefined') {
-      try {
-        // @ts-ignore
-        const clientToken = window.ENV?.VITE_PADDLE_CLIENT_TOKEN || "test_99bce225540de757f831d4cc5f5";
-        // @ts-ignore
-        Paddle.Environment.set(clientToken.startsWith('test_') ? 'sandbox' : 'production');
-        // @ts-ignore
-        Paddle.Initialize({ 
-          token: clientToken
-        });
-      } catch (err) {
-        console.warn("[Paddle Init] Failed to initialize:", err);
-      }
-    }
-  }, []);
+    void import("~/lib/paddle-browser").then(({ initializePaddleBrowser }) => {
+      initializePaddleBrowser({
+        pwCustomer: paddleCustomerId
+          ? { id: paddleCustomerId }
+          : user?.email
+            ? { email: user.email }
+            : null,
+      });
+    });
+  }, [paddleCustomerId, user?.email]);
 
   useEffect(() => {
     if (actionData && 'checkoutPlanId' in actionData) {

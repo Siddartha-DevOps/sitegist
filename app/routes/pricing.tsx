@@ -39,6 +39,8 @@ import { useLoaderData } from "@remix-run/react";
 import { getUser } from "~/backend/auth.server";
 import { openCheckout, resetCheckoutState } from "~/lib/paddle-checkout";
 import { PricingCard } from "~/frontend/components/billing/PricingCard";
+import { getPaddlePriceCatalog } from "~/lib/paddle-prices";
+import { prisma } from "~/database/db.server";
 
 type BillingCycle = "monthly" | "yearly";
 
@@ -50,20 +52,30 @@ interface Toast {
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const user = await getUser(request);
+  const catalog = getPaddlePriceCatalog();
+
+  // Paddle customer id (ctm_…) for Retain — never an internal user id.
+  let paddleCustomerId: string | null = null;
+  if (user?.id) {
+    const sub = await prisma.billingSubscription.findFirst({
+      where: { userId: user.id, externalCustomerId: { not: "" } },
+      orderBy: { updatedAt: "desc" },
+      select: { externalCustomerId: true },
+    });
+    paddleCustomerId = sub?.externalCustomerId || null;
+  }
+
   return json({
     user,
-    // Client Side Token
-    PADDLE_CLIENT_TOKEN: process.env.VITE_PADDLE_CLIENT_TOKEN || "test_99bce225540de757f831d4cc5f5",
-    
-    // Monthly Configuration
-    STARTER_MONTHLY: process.env.VITE_PADDLE_STARTER_MONTHLY_PRICE_ID || "pri_01kqpe8ad9772rdsn3ddbw4bg3",
-    PRO_MONTHLY: process.env.VITE_PADDLE_PRO_MONTHLY_PRICE_ID || "pri_01kqpe9hv3r1v9wfxxvnjgq9zk",
-    ENTERPRISE_MONTHLY: process.env.VITE_PADDLE_ENTERPRISE_MONTHLY_PRICE_ID || "pri_01kqpebd19q7nppxkh53e0cnd3",
-    
-    // Yearly Configuration
-    STARTER_YEARLY: process.env.VITE_PADDLE_STARTER_YEARLY_PRICE_ID || "pri_01kqpebd19q7nppxkh53e0cnd3",
-    PRO_YEARLY: process.env.VITE_PADDLE_PRO_YEARLY_PRICE_ID || "pri_01kqpe9hv3r1v9wfxxvnjgq9zk",
-    ENTERPRISE_YEARLY: process.env.VITE_PADDLE_ENTERPRISE_YEARLY_PRICE_ID || "pri_01kqpe8ad9772rdsn3ddbw4bg3"
+    paddleCustomerId,
+    catalogMissing: catalog.missing,
+    PADDLE_CLIENT_TOKEN: catalog.clientToken,
+    STARTER_MONTHLY: catalog.starterMonthly,
+    PRO_MONTHLY: catalog.proMonthly,
+    ENTERPRISE_MONTHLY: catalog.enterpriseMonthly,
+    STARTER_YEARLY: catalog.starterYearly,
+    PRO_YEARLY: catalog.proYearly,
+    ENTERPRISE_YEARLY: catalog.enterpriseYearly,
   });
 }
 
@@ -137,21 +149,19 @@ export default function Pricing() {
     };
   }, []);
 
-  // Safe initialization of client side Paddle framework matching token
+  // Live is default — no Environment.set("sandbox"). Pass pwCustomer for Retain when known.
   useEffect(() => {
-    // @ts-ignore
-    if (typeof Paddle !== "undefined") {
-      try {
-        const token = data?.PADDLE_CLIENT_TOKEN || "test_99bce225540de757f831d4cc5f5";
-        // @ts-ignore
-        Paddle.Environment.set(token.startsWith("test_") ? "sandbox" : "production");
-        // @ts-ignore
-        Paddle.Initialize({ token });
-      } catch (err) {
-        console.warn("[Paddle Init Verification Failed]", err);
-      }
-    }
-  }, [data?.PADDLE_CLIENT_TOKEN]);
+    void import("~/lib/paddle-browser").then(({ initializePaddleBrowser }) => {
+      initializePaddleBrowser({
+        token: data?.PADDLE_CLIENT_TOKEN || undefined,
+        pwCustomer: data?.paddleCustomerId
+          ? { id: data.paddleCustomerId }
+          : user?.email
+            ? { email: user.email }
+            : null,
+      });
+    });
+  }, [data?.PADDLE_CLIENT_TOKEN, data?.paddleCustomerId, user?.email]);
 
   // Launches Paddle Checkout via dynamic setup integration
   const handleLaunchCheckout = async (tierName: string, priceId: string) => {

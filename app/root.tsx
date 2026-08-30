@@ -334,22 +334,16 @@ export default function App() {
   const data = useLoaderData<typeof loader>();
 
   React.useEffect(() => {
-    // @ts-ignore
-    if (typeof Paddle !== "undefined") {
-      try {
-        const clientToken = data?.ENV?.VITE_PADDLE_CLIENT_TOKEN || "test_99bce225540de757f831d4cc5f5";
-        // Configure environment based on token prefix
-        // @ts-ignore
-        Paddle.Environment.set(clientToken.startsWith("test_") ? "sandbox" : "production");
-        // @ts-ignore
-        Paddle.Initialize({ 
-          token: clientToken 
-        });
-        console.log("[Paddle Global Setup] Paddle.js successfully loaded and initialized.");
-      } catch (err) {
-        console.warn("[Paddle Global Setup] Failed to register Paddle:", err);
+    // Live is Paddle.js default — do not call Environment.set("sandbox").
+    // Token + optional Retain pwCustomer come from env / page loaders.
+    void import("~/lib/paddle-browser").then(({ initializePaddleBrowser }) => {
+      const ok = initializePaddleBrowser({
+        token: data?.ENV?.VITE_PADDLE_CLIENT_TOKEN || undefined,
+      });
+      if (ok) {
+        console.log("[Paddle Global Setup] Paddle.js initialized (live default).");
       }
-    }
+    });
   }, [data?.ENV?.VITE_PADDLE_CLIENT_TOKEN]);
 
   return (

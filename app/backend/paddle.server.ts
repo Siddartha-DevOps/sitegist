@@ -14,9 +14,16 @@ export function getPaddle() {
       return null;
     }
 
-    // Default the API Environment to production (Live: https://api.paddle.com) rather than sandbox (https://sandbox-api.paddle.com)
+    // Live API (api.paddle.com) is the default. Only set sandbox explicitly for local
+    // sandbox keys — production deploys must use Live keys + PADDLE_ENVIRONMENT=production.
+    const envName = (process.env.PADDLE_ENVIRONMENT as Environment) || Environment.production;
+    if (process.env.NODE_ENV === "production" && envName === Environment.sandbox) {
+      console.error(
+        "[Paddle] CONFIG ERROR: PADDLE_ENVIRONMENT=sandbox in production. Use production + Live API keys."
+      );
+    }
     _paddle = new Paddle(apiKey, {
-      environment: (process.env.PADDLE_ENVIRONMENT as Environment) || Environment.production,
+      environment: envName,
     });
   }
   return _paddle;

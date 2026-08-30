@@ -2,8 +2,16 @@ import type { ActionFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { verifyPaddleWebhook } from "~/backend/paddle.server";
 import { prisma } from "~/database/db.server";
+import { isPaddleLiveWebhookIp } from "~/lib/paddle-webhook-ips.server";
 
 export async function action({ request }: ActionFunctionArgs) {
+  // Reject non-Paddle source IPs (Live allowlist from https://api.paddle.com/ips).
+  const ipCheck = await isPaddleLiveWebhookIp(request);
+  if (!ipCheck.ok) {
+    console.warn("[Paddle Webhook] Rejected request", { ip: ipCheck.ip, reason: ipCheck.reason });
+    return json({ error: "Forbidden" }, { status: 403 });
+  }
+
   const event = await verifyPaddleWebhook(request);
   if (!event) return json({ error: "Invalid signature" }, { status: 401 });
   
